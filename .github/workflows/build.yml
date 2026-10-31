@@ -1,0 +1,300 @@
+name: Build Windows
+
+# ---------------------------------------------------------------------------
+# Builds the whole solution (Qt GUI + injector launcher + .NET parser) on
+# github-hosted runners. No self-hosted machine required.
+#
+# The .vcxproj / .csproj files are built EXACTLY as configured by the
+# maintainers: no project file is modified, warnings-as-errors stays on, and
+# the Windows SDK is left unpinned ("latest installed").
+#
+#   Configurations built:    Release|Win32, Release|x64, Static|x64
+#   Deliberately NOT built:  Static|Win32  <-- see the matrix notes below
+#
+# LOCAL BUILD (maintainers): the QtMSBuild targets are NOT vendored in this
+# repo, so a local build needs the "Qt VS Tools" extensions - or, manually:
+#
+#   curl -LO https://download.qt.io/official_releases/vsaddin/3.5.0/qt-vsaddin-msbuild-3.5.0.zip
+#   7z x qt-vsaddin-msbuild-3.5.0.zip -o <somewhere>
+#   set QtMsBuild=<somewhere>          # MSBuild reads env vars as properties
+#   msbuild "GH Injector GUI\GH Injector GUI.vcxproj" -t:Build ^
+#     -p:Configuration=Release -p:Platform=x64 ^
+#     -p:SolutionDir="%CD%\" -p:QtInstall=C:\Qt\5.15.2\msvc2019_64
+#
+#   (-p:QtInstall must be a PATH: the targets resolve it with Exists() before
+#    ever consulting the registry, so it re-points every <QtInstall> value in
+#    the project - "msvc2019_64", "msvc2019", and the static aliases.)
+# ---------------------------------------------------------------------------
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  QT_VERSION: '5.15.2'
+  QT_BASE: 'C:\Qt'
+  # Official standalone Qt/MSBuild targets (Qt Company redistributable, 165 KB,
+  # no DLL needed - the 19 tasks are inline C# compiled by MSBuild itself).
+  # Downloaded per run rather than vendored, by decision.
+  QT_MSBUILD_URL: 'https://download.qt.io/official_releases/vsaddin/3.5.0/qt-vsaddin-msbuild-3.5.0.zip'
+  # Prebuilt STATIC Qt 5.15.2, x64 only. No x86 static Qt 5.15.2 build exists
+  # anywhere upstream, which is what makes Static|Win32 unbuildable.
+  QT_STATIC_URL: 'https://github.com/martinrotter/qt5-minimalistic-builds/releases/download/5.15.2/qt-5.15.2-static-msvc2019-x86_64.7z'
+  INJECTOR_REPO: 'https://github.com/guidedhacking/GuidedHacking-Injector'
+
+jobs:
+  # -------------------------------------------------------------------------
+  # The GUI LoadLibrary()s "GH Injector - x64.dll" / "- x86.dll" at runtime
+  # (InjectionLib.cpp). Those DLLs are not built by this solution, so we build
+  # them once here and hand them to the GUI jobs.
+  #
+  # LICENSE: GuidedHacking-Injector ships under the "GuidedHacking.com Source
+  # Available License" whose README states you "do not have permission/license
+  # to distribute the compiled binaries". They are built here ONLY so this
+  # repo's own artifacts can run; they are not published to any Release.
+  #
+  # TRACKING: pinned to nothing - this follows the library's default branch
+  # (master), so a change over there can break this job with no change over
+  # here (deliberate choice, recorded so it isn't a surprise).
+  # -------------------------------------------------------------------------
+  injector-library:
+    name: Injector library ${{ matrix.name }}
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: x86
+            platform: Win32
+            msvc_arch: x86
+            artifact: injector-lib-x86
+          - name: x64
+            platform: x64
+            msvc_arch: x64
+            artifact: injector-lib-x64
+    steps:
+      - name: Clone (depth 1, default branch)
+        shell: pwsh
+        run: git clone --depth 1 "${{ env.INJECTOR_REPO }}" "${{ runner.temp }}\injector-lib"
+
+      - name: Set up MSVC toolchain
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ matrix.msvc_arch }}
+
+      - name: Build library ${{ matrix.platform }}
+        shell: pwsh
+        run: |
+          msbuild "${{ runner.temp }}\injector-lib\GH Injector Library\GH Injector Library.vcxproj" `
+            -t:Build -verbosity:minimal -nologo `
+            -p:Configuration=Release `
+            -p:Platform="${{ matrix.platform }}" `
+            -p:OutDir="${{ runner.temp }}\lib\"
+
+      - name: Collect DLLs
+        shell: pwsh
+        run: |
+          $dlls = Get-ChildItem -Path "${{ runner.temp }}\lib" -Filter "GH Injector - *.dll" -Recurse -ErrorAction SilentlyContinue
+          if (-not $dlls) { throw "No 'GH Injector - *.dll' produced - did the library's configuration/platform change?" }
+          New-Item -ItemType Directory -Force -Path "${{ matrix.artifact }}" | Out-Null
+          $dlls | Copy-Item -Destination "${{ matrix.artifact }}\"
+          Get-ChildItem "${{ matrix.artifact }}" | Select-Object -ExpandProperty Name
+
+      - name: Upload ${{ matrix.artifact }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}\*.dll
+          retention-days: 14
+          if-no-files-found: error
+
+  # -------------------------------------------------------------------------
+  # GUI matrix. Static|Win32 is missing on purpose: it asks the project for a
+  # 32-bit static Qt 5.15.2 and no such build is published anywhere (martinrotter
+  # is x86_64-only, Qt publishes no open-source static binaries), so it can
+  # only be produced by a maintainer with a hand-built Qt. Static|x64 IS built
+  # here, from martinrotter's prebuilt archive.
+  # -------------------------------------------------------------------------
+  build-gui:
+    name: GUI ${{ matrix.name }}
+    runs-on: windows-2022
+    needs: injector-library
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Release|Win32
+            configuration: Release
+            platform: Win32
+            short: x86
+            msvc_arch: x86
+            qt_arch: win32_msvc2019
+            qt_kind: dynamic
+            lib_artifact: injector-lib-x86
+            artifact: gh-injector-gui-release-x86
+          - name: Release|x64
+            configuration: Release
+            platform: x64
+            short: x64
+            msvc_arch: x64
+            qt_arch: win64_msvc2019_64
+            qt_kind: dynamic
+            lib_artifact: injector-lib-x64
+            artifact: gh-injector-gui-release-x64
+          - name: Static|x64
+            configuration: Static
+            platform: x64
+            short: x64
+            msvc_arch: x64
+            qt_arch: win64_msvc2019_64
+            qt_kind: static
+            lib_artifact: injector-lib-x64
+            artifact: gh-injector-gui-static-x64
+    steps:
+      - uses: actions/checkout@v4
+
+      # cl.exe + MSBuild on PATH. The project pins PlatformToolset v143, so the
+      # VS2022 toolchain on this image is what we want; a custom `arch` is set
+      # because the default matches the runner, not the target platform.
+      - name: Set up MSVC toolchain (${{ matrix.msvc_arch }})
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ matrix.msvc_arch }}
+
+      # .NET 7 is EOL (May 2024) and is NOT preinstalled on this image (8/9/10
+      # only), so it has to be installed explicitly. Deliberate choice: keep
+      # the target framework the maintainers actually build.
+      - name: Set up .NET SDK 7.0.x (net7.0)
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 7.0.x
+
+      - name: Install Qt 5.15.2 (dynamic)
+        if: matrix.qt_kind == 'dynamic'
+        id: install-qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          arch: ${{ matrix.qt_arch }}
+          target: desktop
+          cache: true
+
+      - name: Cache prebuilt static Qt archive
+        if: matrix.qt_kind == 'static'
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}\qt-static-archive
+          key: qt-static-5.15.2-msvc2019-x86_64-7z
+
+      - name: Install Qt 5.15.2 (static, prebuilt .7z)
+        if: matrix.qt_kind == 'static'
+        shell: pwsh
+        run: |
+          $archiveDir = "${{ runner.temp }}\qt-static-archive"
+          New-Item -ItemType Directory -Force -Path $archiveDir | Out-Null
+          $archive = Join-Path $archiveDir "qt-5.15.2-static-msvc2019-x86_64.7z"
+          if (-not (Test-Path $archive)) {
+            Write-Host "Downloading 766 MB static Qt archive..."
+            Invoke-WebRequest -Uri "${{ env.QT_STATIC_URL }}" -OutFile $archive
+          }
+          $out = "${{ env.QT_BASE }}\5.15.2\qt-5.15.2-static-msvc2019-x86_64"
+          7z x $archive -o"$out" -y | Out-Null
+
+      # The Qt root fed to -p:QtInstall below. This single property is what
+      # re-points every <QtInstall> value in the vcxproj, and it also derives
+      # $(QTDIR), which the post-build xcopy of Qt DLLs depends on.
+      - name: Resolve Qt root (dynamic)
+        if: matrix.qt_kind == 'dynamic'
+        shell: pwsh
+        run: |
+          "QT_ROOT=${{ steps.install-qt.outputs.qt-root-dir }}" >> $env:GITHUB_ENV
+          Write-Host "Qt root: ${{ steps.install-qt.outputs.qt-root-dir }}"
+
+      # The .7z nests unpredictably, so locate qmake.exe instead of assuming a
+      # layout. NOTE: this is the one unverified assumption in the workflow -
+      # if martinrotter's static build does not ship qmake.exe, the QtMSBuild
+      # QtVars target fails here with a clear error rather than silently.
+      - name: Resolve Qt root (static)
+        if: matrix.qt_kind == 'static'
+        shell: pwsh
+        run: |
+          $qmake = Get-ChildItem -Path "${{ env.QT_BASE }}" -Filter qmake.exe -Recurse -ErrorAction SilentlyContinue |
+                   Select-Object -First 1
+          if (-not $qmake) { throw "qmake.exe not found under ${{ env.QT_BASE }} - the QtMsBuild QtVars target requires it." }
+          $root = $qmake.Directory.Parent.FullName
+          "QT_ROOT=$root" >> $env:GITHUB_ENV
+          Write-Host "Qt root: $root"
+
+      # The standalone Qt/MSBuild targets. Not vendored in the repo, so the
+      # project's own fallback of $(MSBuildProjectDirectory)\QtMsBuild would
+      # resolve to a nonexistent folder - and because every import is guarded by
+      # Exists(), that failure is silent: no moc/uic/rcc runs, and you only find
+      # out at link time (missing ui_*.h, moc_*.cpp, qrc_*.cpp). Setting the
+      # "QtMsBuild" env var is the officially documented mechanism.
+      - name: Install QtMSBuild targets
+        shell: pwsh
+        run: |
+          $dest = "${{ runner.temp }}\qtmsbuild"
+          $zip = "${{ runner.temp }}\qt-vsaddin-msbuild-3.5.0.zip"
+          Invoke-WebRequest -Uri "${{ env.QT_MSBUILD_URL }}" -OutFile $zip
+          7z x $zip -o"$dest" -y | Out-Null
+          if (-not (Test-Path "$dest\qt.targets")) { Get-ChildItem -Recurse $dest | Select-Object -ExpandProperty FullName; throw "qt.targets missing after extraction" }
+          "QtMsBuild=$dest" >> $env:GITHUB_ENV
+          Write-Host "QtMsBuild: $dest"
+
+      - name: Build GUI ${{ matrix.name }}
+        shell: pwsh
+        run: |
+          msbuild "GH Injector GUI\GH Injector GUI.vcxproj" `
+            -t:Build -verbosity:minimal -nologo `
+            -p:Configuration="${{ matrix.configuration }}" `
+            -p:Platform="${{ matrix.platform }}" `
+            -p:SolutionDir="${{ github.workspace }}\" `
+            -p:QtInstall="$env:QT_ROOT"
+
+      # Replicates FolderProfile.pubxml (win-x86, single-file, non-self-contained)
+      # but redirects output to a temp dir: the profile's own PublishDir writes
+      # into Release/x86/, which only makes sense for the Win32 job. Copying the
+      # exe into every OutDir puts it beside the GUI the way the GUI expects
+      # (GuiMain.cpp CreateProcessW's "GH .NET Parser.exe" from its own folder).
+      - name: Publish .NET parser
+        shell: pwsh
+        run: |
+          dotnet publish "GH .NET Parser\GH .NET Parser.csproj" `
+            -c Release -r win-x86 --self-contained false -p:PublishSingleFile=true `
+            -o "${{ runner.temp }}\parser"
+
+      - name: Download injection library ${{ matrix.lib_artifact }}
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.lib_artifact }}
+          path: ${{ runner.temp }}\injector-lib
+
+      - name: Assemble bundle
+        shell: pwsh
+        run: |
+          $bundle = "${{ github.workspace }}\${{ matrix.configuration }}\${{ matrix.short }}"
+          if (-not (Test-Path "$bundle\GH Injector - ${{ matrix.short }}.exe")) {
+            throw "Expected GUI output '$bundle\GH Injector - ${{ matrix.short }}.exe' was not produced."
+          }
+          Copy-Item "${{ runner.temp }}\injector-lib\*" $bundle
+          Copy-Item "${{ runner.temp }}\parser\GH .NET Parser.exe" $bundle
+          Get-ChildItem $bundle | Select-Object Name, Length
+
+      - name: Zip bundle
+        shell: pwsh
+        run: Compress-Archive -Path "${{ github.workspace }}\${{ matrix.configuration }}\${{ matrix.short }}\*" -DestinationPath "${{ matrix.artifact }}.zip" -Force
+
+      - name: Upload ${{ matrix.artifact }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}.zip
+          retention-days: 14
+          if-no-files-found: error

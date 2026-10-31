@@ -11,5 +11,9 @@ GH Injector GUI/Static/
 GH Injector GUI/GH Injector.zip
 GH Injector GUI/Settings.ini
 GH Injector GUI/GH_Inj_Log.txt
-GH .NET Parser/obj/publish/
+GH .NET Parser/obj/
 GH .NET Parser/bin/
+GH .NET Parser/Properties/PublishProfiles/*.pubxml.user
+*.aps
+*.user
+.scratch/
