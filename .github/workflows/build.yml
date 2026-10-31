@@ -8,6 +8,11 @@ name: Build Windows
 # maintainers: no project file is modified, warnings-as-errors stays on, and
 # the Windows SDK is left unpinned ("latest installed").
 #
+# One compiler flag is injected, from Directory.Build.props: /wd5054, for the
+# Qt 5.15.2 warning C5054 that pch.h's own #pragma warning(disable: 5054)
+# cannot suppress (pragmas in PCH'd source are ignored under /Yu). See the long
+# comment in that file for the full reasoning and when to delete it.
+#
 #   Configurations built:    Release|Win32, Release|x64, Static|x64
 #   Deliberately NOT built:  Static|Win32  <-- see the matrix notes below
 #

@@ -1,0 +1,69 @@
+<Project>
+  <!--
+    /wd5054 - workaround for Qt 5.15.2 + modern MSVC (/std:c++20).
+
+    WHAT FAILS
+    ----------
+    Qt 5.15.2's QtWidgets/qsizepolicy.h contains an inline body that mixes
+    enumeration types (around lines 137-139, in expandingDirections()):
+
+        warning C5054: operator '&': deprecated between enumerations
+                      of different types
+
+    TreatWarningAsError is true for Release|* and Static|*, so the warning
+    becomes error C2220, the pch.cpp compile dies, the precompiled header is
+    never established, and the run then reports a cascade of confusing
+    secondary errors ("missing type specifier" in DebugConsole.h / Process.h,
+    a spurious "operator== already declared") that are parse corruption from
+    the dead PCH, not real breakage.
+
+    WHY pch.h's OWN PRAGMA DOES NOT CATCH IT
+    ----------------------------------------
+    pch.h already wraps its Qt includes in #pragma warning(push) /
+    warning(disable: 5054) / warning(pop), and it is not enough. Per the MSVC
+    docs on precompiled headers, under /Yu (Use Precompiled Header File) "the
+    compiler ignores all preprocessor directives (including pragmas) that
+    appear in the source code that will be precompiled". Because pch.h's guard
+    is a balanced push/pop, the disable is already undone by the end of the
+    PCH, so any instance of the warning emitted in a consuming translation
+    unit is unguarded. The docs also state the fix explicitly: "To override
+    the precompiled header warning options, set another warning option on the
+    command line" - which is why this lives in a props file that feeds the
+    compiler, not in a source pragma.
+
+    WHY A COMMAND-LINE /wd RATHER THAN /Wv
+    --------------------------------------
+    /Wv:<version> suppresses every warning introduced after that compiler
+    generation. /Wv:18 (VS2015 RTM) would silence essentially every MSVC
+    warning added in the last decade - including in this repo's own code -
+    which the docs explicitly advise against ("Don't suppress all new warnings
+    permanently"). /wd5054 disables exactly the one warning, compile-wide,
+    keeps every other modern warning active, and survives the PCH state.
+
+    WHY HERE RATHER THAN AN EDIT TO THE .vcxproj
+    --------------------------------------------
+    AdditionalOptions is item metadata on ClCompile, not an MSBuild property,
+    so the flag cannot be passed on the MSBuild command line.
+    Directory.Build.props is imported automatically by Microsoft.Common.props
+    for every C++ project under this folder (import order per MSLearn:
+    vcxproj -> Microsoft.Cpp.default.props -> Microsoft.Common.props ->
+    Directory.Build.props -> Microsoft.Cpp.props ...), so all three projects
+    pick it up, no existing file is edited, and CI matches a local build.
+
+    REMOVE THIS FILE WHEN
+    ---------------------
+      * the project moves off Qt 5.15.x (end-of-life; the offending header
+        cannot be fixed in a prebuilt binary), or
+      * TreatWarningAsError is turned off for Release|* / Static|*.
+
+    If another warning from a Qt header surfaces (the pragma above is inert, so
+    one more may yet appear), add the narrow /wd<n> here rather than reaching
+    for /Wv: the cost of one more specific disable is far lower than losing all
+    post-VS2015 warnings.
+  -->
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <AdditionalOptions>%(AdditionalOptions) /wd5054</AdditionalOptions>
+    </ClCompile>
+  </ItemDefinitionGroup>
+</Project>
