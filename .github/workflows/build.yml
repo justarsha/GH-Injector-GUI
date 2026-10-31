@@ -256,12 +256,19 @@ jobs:
       - name: Build GUI ${{ matrix.name }}
         shell: pwsh
         run: |
+          # Diagnostic: disable the PCH for this run to determine whether the
+          # DebugConsole.h / process.h "unknown type" errors are a PCH problem
+          # (they should vanish if the PCH is the culprit) or a real source
+          # issue. If this run is green, the PCH is broken and we replace it
+          # with a proper fix next; if it stays red with the same errors, the
+          # errors are independent of the PCH.
           msbuild "GH Injector GUI\GH Injector GUI.vcxproj" `
             -t:Build -verbosity:minimal -nologo `
             -p:Configuration="${{ matrix.configuration }}" `
             -p:Platform="${{ matrix.platform }}" `
             -p:SolutionDir="${{ github.workspace }}\" `
-            -p:QtInstall="$env:QT_ROOT"
+            -p:QtInstall="$env:QT_ROOT" `
+            -p:PrecompiledHeader=NotUsing
 
       # Replicates FolderProfile.pubxml (win-x86, single-file, non-self-contained)
       # but redirects output to a temp dir: the profile's own PublishDir writes
