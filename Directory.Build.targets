@@ -1,0 +1,29 @@
+<Project>
+  <!--
+    CI-only: disable the precompiled header when running under GitHub Actions.
+
+    The DebugConsole.h / process.h "unknown type" errors (QListWidget,
+    tagPROCESSENTRY32) are reported while pch.cpp is the active source file.
+    pch.h itself does NOT include DebugConsole.h or process.h, so those
+    errors cannot be in pch.cpp's own translation unit - they come from
+    precompiled-header consumption: a TU that uses the PCH gets its types
+    from the PCH snapshot, and that snapshot is not delivering QtWidgets /
+    TlHelp32 to those TUs. Disabling the PCH makes pch.h parse normally in
+    every TU, which is the diagnostic that tells us whether the PCH is the
+    culprit (green) or whether the errors are real (still red, same lines).
+
+    This is gated on $(GITHUB_ACTIONS) so local builds keep using the PCH
+    (the maintainers rely on it for compile speed). It is a diagnostic, not
+    the final fix: if it turns the build green, replace it with a proper PCH
+    repair; if it stays red, the errors are genuine source bugs and this file
+    can be deleted.
+  -->
+  <Target Name="DisablePchInCi" BeforeTargets="ClCompile"
+          Condition="'$(GITHUB_ACTIONS)' == 'true'">
+    <ItemGroup>
+      <ClCompile>
+        <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      </ClCompile>
+    </ItemGroup>
+  </Target>
+</Project>

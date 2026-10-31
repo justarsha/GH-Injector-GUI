@@ -256,19 +256,16 @@ jobs:
       - name: Build GUI ${{ matrix.name }}
         shell: pwsh
         run: |
-          # Diagnostic: disable the PCH for this run to determine whether the
-          # DebugConsole.h / process.h "unknown type" errors are a PCH problem
-          # (they should vanish if the PCH is the culprit) or a real source
-          # issue. If this run is green, the PCH is broken and we replace it
-          # with a proper fix next; if it stays red with the same errors, the
-          # errors are independent of the PCH.
+          # PCH is disabled under CI by Directory.Build.targets (gated on
+          # GITHUB_ACTIONS) - see that file for the reasoning. The command line
+          # here only carries the Qt install path and the warning flag lives in
+          # Directory.Build.props.
           msbuild "GH Injector GUI\GH Injector GUI.vcxproj" `
             -t:Build -verbosity:minimal -nologo `
             -p:Configuration="${{ matrix.configuration }}" `
             -p:Platform="${{ matrix.platform }}" `
             -p:SolutionDir="${{ github.workspace }}\" `
-            -p:QtInstall="$env:QT_ROOT" `
-            -p:PrecompiledHeader=NotUsing
+            -p:QtInstall="$env:QT_ROOT"
 
       # Replicates FolderProfile.pubxml (win-x86, single-file, non-self-contained)
       # but redirects output to a temp dir: the profile's own PublishDir writes
