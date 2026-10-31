@@ -44,6 +44,11 @@ concurrency:
 env:
   QT_VERSION: '5.15.2'
   QT_BASE: 'C:\Qt'
+  # Diagnostic: disable precompiled headers at the compiler level. The
+  # Directory.Build.targets-based disable did not take effect (the errors were
+  # identical to the PCH-enabled run), so /Y- is the authoritative way to
+  # force cl.exe to parse pch.h normally in every translation unit.
+  CL: '/Y-'
   # Official standalone Qt/MSBuild targets (Qt Company redistributable, 165 KB,
   # no DLL needed - the 19 tasks are inline C# compiled by MSBuild itself).
   # Downloaded per run rather than vendored, by decision.
@@ -256,10 +261,12 @@ jobs:
       - name: Build GUI ${{ matrix.name }}
         shell: pwsh
         run: |
-          # PCH is disabled under CI by Directory.Build.targets (gated on
-          # GITHUB_ACTIONS) - see that file for the reasoning. The command line
-          # here only carries the Qt install path and the warning flag lives in
-          # Directory.Build.props.
+          # PCH experiment: the Directory.Build.targets disable did not take
+          # effect (the errors are identical to the PCH-enabled run), so disable
+          # the PCH at the compiler level via the CL env var. /Y- tells cl.exe
+          # to ignore every /Yu and /Yc, so pch.h is parsed normally in every
+          # TU. If this run is green, the PCH was the problem; if it stays red
+          # with the same errors, they are real source bugs.
           msbuild "GH Injector GUI\GH Injector GUI.vcxproj" `
             -t:Build -verbosity:minimal -nologo `
             -p:Configuration="${{ matrix.configuration }}" `
